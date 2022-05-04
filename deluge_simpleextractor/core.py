@@ -170,20 +170,20 @@ class Core(CorePluginBase):
         files = tid.get_files()
         files_to_process_counter = ThreadSafeCounter(len(files))
         for f in files:
-            log.info("Handling file %s", f['path'])
+            log.debug("Handling file %s", f['path'])
             file_root, file_ext = os.path.splitext(f['path'])
             file_ext_sec = os.path.splitext(file_root)[1]
             if file_ext_sec and file_ext_sec + file_ext in EXTRACT_COMMANDS:
-                log.info("We should extract this.")
+                log.debug("We should extract this.")
                 file_ext = file_ext_sec + file_ext
             elif file_ext not in EXTRACT_COMMANDS or file_ext_sec == '.tar':
-                log.info('Cannot extract file with unknown file type: %s', f['path'])
+                log.debug('Cannot extract file with unknown file type: %s', f['path'])
                 files_to_process_counter.decrement()
                 continue
             elif file_ext == '.rar' and 'part' in file_ext_sec:
                 part_num = file_ext_sec.split('part')[1]
                 if part_num.isdigit() and int(part_num) != 1:
-                    log.info('Skipping remaining multi-part rar files: %s', f['path'])
+                    log.debug('Skipping remaining multi-part rar files: %s', f['path'])
                     files_to_process_counter.decrement()
                     continue
 
