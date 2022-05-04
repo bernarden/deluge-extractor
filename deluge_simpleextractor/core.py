@@ -186,6 +186,10 @@ class Core(CorePluginBase):
                     log.debug('Skipping remaining multi-part rar files: %s', f['path'])
                     files_to_process_counter.decrement()
                     continue
+            elif file_ext == '.r00' and any(x['path'] == file_root + ".rar" for x in files):
+                log.debug('Skipping file with .r00 extension because a matching .rar file exists: %s', f['path'])
+                files_to_process_counter.decrement()
+                continue
 
             cmd = EXTRACT_COMMANDS[file_ext]
 
