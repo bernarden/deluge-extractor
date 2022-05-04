@@ -163,8 +163,8 @@ class Core(CorePluginBase):
         extract_torrent_root = self.config["extract_torrent_root"]
 
         if not do_extract:
+            log.info("Do not extract. Torrent handling complete.")
             tid.is_finished = True
-            log.info("Nothing to extract. Torrent handling complete.")
             return
         
         files = tid.get_files()
@@ -213,6 +213,7 @@ class Core(CorePluginBase):
             except OSError as ex:
                 if not (ex.errno == errno.EEXIST and os.path.isdir(dest)):
                     log.error("EXTRACTOR: Error creating destination folder: %s", ex)
+                    files_to_process_counter.decrement()
                     break
 
             def on_extract(result, torrent_id, fpath, files_to_process_counter, tid):
@@ -224,15 +225,20 @@ class Core(CorePluginBase):
 
                 files_to_process_counter.decrement()
                 if files_to_process_counter.value == 0:
-                    tid.is_finished = True
                     log.info("Torrent extractions complete. (%s)", torrent_id)
+                    tid.is_finished = True
 
             # Run the command and add callback.
             log.info('Extracting %s from %s with %s %s to %s', fpath, torrent_id, cmd[0], cmd[1], dest)
             d = getProcessOutputAndValue(cmd[0], cmd[1].split() + [str(fpath)], os.environ, str(dest))
             d.addCallback(on_extract, torrent_id=torrent_id, fpath=fpath, files_to_process_counter=files_to_process_counter, tid=tid)
         
-        log.info("Extractions started. Torrent handling complete.")
+        if files_to_process_counter.value == 0:
+            # Would happen if extraction completed before loop above stopped or if there was nothing to extract.
+            log.info("Torrent handling/extractions complete.")
+            tid.is_finished = True
+        else:
+            log.info("Extractions started. Torrent handling complete.")
 
     def get_labels(self, torrent_id):
         """
