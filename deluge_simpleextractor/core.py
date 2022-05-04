@@ -16,6 +16,7 @@ from __future__ import unicode_literals
 import errno
 import logging
 import os
+import threading
 
 from twisted.internet.utils import getProcessOutputAndValue
 from twisted.python.procutils import which
@@ -161,73 +162,73 @@ class Core(CorePluginBase):
         extract_in_place = self.config["extract_in_place"]
         extract_torrent_root = self.config["extract_torrent_root"]
 
-        if do_extract:
-            files = tid.get_files()
-            for f in files:
-                log.info("Handling file %s", f['path'])
-                file_root, file_ext = os.path.splitext(f['path'])
-                file_ext_sec = os.path.splitext(file_root)[1]
-                if file_ext_sec and file_ext_sec + file_ext in EXTRACT_COMMANDS:
-                    log.info("We should extract this.")
-                    file_ext = file_ext_sec + file_ext
-                elif file_ext not in EXTRACT_COMMANDS or file_ext_sec == '.tar':
-                    log.info('Cannot extract file with unknown file type: %s', f['path'])
+        if not do_extract:
+            tid.is_finished = True
+            log.info("Nothing to extract. Torrent handling complete.")
+            return
+        
+        files = tid.get_files()
+        files_to_process_counter = ThreadSafeCounter(len(files))
+        for f in files:
+            log.info("Handling file %s", f['path'])
+            file_root, file_ext = os.path.splitext(f['path'])
+            file_ext_sec = os.path.splitext(file_root)[1]
+            if file_ext_sec and file_ext_sec + file_ext in EXTRACT_COMMANDS:
+                log.info("We should extract this.")
+                file_ext = file_ext_sec + file_ext
+            elif file_ext not in EXTRACT_COMMANDS or file_ext_sec == '.tar':
+                log.info('Cannot extract file with unknown file type: %s', f['path'])
+                files_to_process_counter.decrement()
+                continue
+            elif file_ext == '.rar' and 'part' in file_ext_sec:
+                part_num = file_ext_sec.split('part')[1]
+                if part_num.isdigit() and int(part_num) != 1:
+                    log.info('Skipping remaining multi-part rar files: %s', f['path'])
+                    files_to_process_counter.decrement()
                     continue
-                elif file_ext == '.rar' and 'part' in file_ext_sec:
-                    part_num = file_ext_sec.split('part')[1]
-                    if part_num.isdigit() and int(part_num) != 1:
-                        log.info('Skipping remaining multi-part rar files: %s', f['path'])
-                        continue
 
-                cmd = EXTRACT_COMMANDS[file_ext]
+            cmd = EXTRACT_COMMANDS[file_ext]
 
-                fpath = os.path.normpath(os.path.join(t_status['download_location'], f['path']))
+            fpath = os.path.normpath(os.path.join(t_status['download_location'], f['path']))
 
-                # Get the destination path, use that by default
-                dest = os.path.normpath(self.config["extract_path"])
+            # Get the destination path, use that by default
+            dest = os.path.normpath(self.config["extract_path"])
 
-                # Override destination if extract_torrent_root is set
-                if extract_torrent_root:
-                    dest = os.path.join(os.path.normpath(t_status['download_location']), t_status['name'])
+            # Override destination if extract_torrent_root is set
+            if extract_torrent_root:
+                dest = os.path.join(os.path.normpath(t_status['download_location']), t_status['name'])
 
-                # Override destination to file path if in_place set
-                f_parent = os.path.normpath(os.path.join(t_status['download_location'], os.path.dirname(f['path'])))
-                if extract_in_place and ((not os.path.exists(f_parent)) or os.path.isdir(f_parent)):
-                    dest = f_parent
-                    log.debug("Extracting in-place: " + dest)
+            # Override destination to file path if in_place set
+            f_parent = os.path.normpath(os.path.join(t_status['download_location'], os.path.dirname(f['path'])))
+            if extract_in_place and ((not os.path.exists(f_parent)) or os.path.isdir(f_parent)):
+                dest = f_parent
+                log.debug("Extracting in-place: " + dest)
 
-                try:
-                    os.makedirs(dest)
-                except OSError as ex:
-                    if not (ex.errno == errno.EEXIST and os.path.isdir(dest)):
-                        log.error("EXTRACTOR: Error creating destination folder: %s", ex)
-                        break
+            try:
+                os.makedirs(dest)
+            except OSError as ex:
+                if not (ex.errno == errno.EEXIST and os.path.isdir(dest)):
+                    log.error("EXTRACTOR: Error creating destination folder: %s", ex)
+                    break
 
-                def on_extract(result, torrent_id, fpath):
-                    # Check command exit code.
-                    if not result[2]:
-                        log.info('Extract successful: %s (%s)', fpath, torrent_id)
-                    else:
-                        log.error(
-                            'Extract failed: %s (%s) %s', fpath, torrent_id, result[1]
-                        )
+            def on_extract(result, torrent_id, fpath, files_to_process_counter, tid):
+                # Check command exit code.
+                if not result[2]:
+                    log.info('Extract successful: %s (%s)', fpath, torrent_id)
+                else:
+                    log.error('Extract failed: %s (%s) %s', fpath, torrent_id, result[1])
 
-                # Run the command and add callback.
-                log.info(
-                    'Extracting %s from %s with %s %s to %s',
-                    fpath,
-                    torrent_id,
-                    cmd[0],
-                    cmd[1],
-                    dest,
-                )
-                d = getProcessOutputAndValue(
-                    cmd[0], cmd[1].split() + [str(fpath)], os.environ, str(dest)
-                )
-                d.addCallback(on_extract, torrent_id, fpath)
+                files_to_process_counter.decrement()
+                if files_to_process_counter.value == 0:
+                    tid.is_finished = True
+                    log.info("Torrent extractions complete. (%s)", torrent_id)
 
-        tid.is_finished = True
-        log.info("Torrent extraction/handling complete.")
+            # Run the command and add callback.
+            log.info('Extracting %s from %s with %s %s to %s', fpath, torrent_id, cmd[0], cmd[1], dest)
+            d = getProcessOutputAndValue(cmd[0], cmd[1].split() + [str(fpath)], os.environ, str(dest))
+            d.addCallback(on_extract, torrent_id=torrent_id, fpath=fpath, files_to_process_counter=files_to_process_counter, tid=tid)
+        
+        log.info("Extractions started. Torrent handling complete.")
 
     def get_labels(self, torrent_id):
         """
@@ -263,3 +264,20 @@ class Core(CorePluginBase):
     def get_config(self):
         """Returns the config dictionary."""
         return self.config.config
+
+class ThreadSafeCounter(object):
+    def __init__(self):
+        self.value = 0
+        self._lock = threading.Lock()
+    
+    def __init__(self, value):
+        self.value = value
+        self._lock = threading.Lock()
+        
+    def increment(self):
+        with self._lock:
+            self.value += 1
+
+    def decrement(self):
+        with self._lock:
+            self.value -= 1
